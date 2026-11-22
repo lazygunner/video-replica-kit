@@ -11,6 +11,7 @@ license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.26.0",
+  "onnxruntime>=1.18.0",
   "opencv-python-headless>=4.9.0",
   "pillow>=10.0.0",
   "tos>=2.7.0",

@@ -18,6 +18,7 @@ from .providers.storage_tos import upload_files_to_tos
 from .providers.video_edit_ark import submit_ark_edit, wait_ark_edit
 from .state import JobState
 from .vfx.composite import run_composite_pipeline
+from .vfx.onnx_models import MODEL_REGISTRY, ensure_model_downloaded, get_models_status
 
 
 def _emit(payload: dict[str, Any], as_json: bool) -> None:
@@ -228,6 +229,10 @@ def cmd_composite(args: argparse.Namespace) -> dict[str, Any]:
         gen_video=gen_v,
         out_dir=out_dir,
         mask_mode=args.mask_mode,
+        use_sam2=bool(args.use_onnx or args.use_sam2),
+        use_depth=bool(args.use_onnx or args.use_depth),
+        onnx_stride=args.onnx_stride,
+        depth_margin=args.depth_margin,
         ffmpeg_bin=cfg.ffmpeg_bin,
         ffprobe_bin=cfg.ffprobe_bin,
         tag=stage,
@@ -238,6 +243,14 @@ def cmd_composite(args: argparse.Namespace) -> dict[str, Any]:
     st.record_event("composite", {"stage": stage, "bg_mae_composited": res["bg_mae_composited_vs_orig"]})
     st.save()
     return res
+
+
+def cmd_models(args: argparse.Namespace) -> dict[str, Any]:
+    if args.action == "status":
+        return get_models_status()
+    keys = list(MODEL_REGISTRY.keys()) if args.models == "all" else [x.strip() for x in args.models.split(",") if x.strip()]
+    downloaded = {k: {fn: str(p) for fn, p in ensure_model_downloaded(k, force=args.force).items()} for k in keys}
+    return {"downloaded": downloaded, "status": get_models_status()}
 
 
 def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
@@ -324,7 +337,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--gen-video")
     sp.add_argument("--out-dir")
     sp.add_argument("--mask-mode", default="auto_contour", choices=["auto_contour", "ellipse"])
+    sp.add_argument("--use-onnx", action="store_true", help="Enable both local SAM 2.1 Tiny matting and Depth Anything V2 occlusion guard (auto-downloads ONNX weights).")
+    sp.add_argument("--use-sam2", action="store_true", help="Enable local SAM 2.1 Tiny ONNX subject matting.")
+    sp.add_argument("--use-depth", action="store_true", help="Enable local Depth Anything V2 ONNX foreground occlusion detection.")
+    sp.add_argument("--onnx-stride", type=int, default=0, help="Run ONNX every N frames and propagate via optical flow (0 = auto).")
+    sp.add_argument("--depth-margin", type=float, default=0.14, help="Relative depth threshold above subject depth to classify closer foreground occluders.")
     sp.set_defaults(func=cmd_composite)
+
+    sp = sub.add_parser("models", help="Check or pre-download local ONNX models (SAM 2.1 Tiny + Depth Anything V2 Small).")
+    sp.add_argument("action", choices=["status", "download"])
+    sp.add_argument("--models", default="all", help="all, sam2, depth, or comma-separated list.")
+    sp.add_argument("--force", action="store_true")
+    sp.set_defaults(func=cmd_models)
 
     sp = sub.add_parser("status", help="Inspect job state.json.")
     sp.add_argument("job_dir")

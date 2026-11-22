@@ -97,17 +97,21 @@ Rules:
    ```
 
 ### Phase 4 — Automated High-Resolution Background Restoration & Color Passthrough
-Run deterministic finishing (zero additional API cost; safe to re-run with different `--mask-mode` if needed):
+Run deterministic finishing (zero additional API cost; safe to re-run with different `--mask-mode` or `--use-onnx` if needed):
 ```bash
+# Fast pure-CV mode:
 $VIDREP composite ./jobs/<name> --stage full --mask-mode auto_contour
+
+# High-precision local ONNX mode (auto-downloads SAM 2.1 Tiny matting + Depth Anything V2 occlusion guard):
+$VIDREP composite ./jobs/<name> --stage full --mask-mode auto_contour --use-onnx
 ```
 This automatically executes:
-- Deterministic FFmpeg rawvideo decode (zero macOS AVFoundation HDR corruption)
+- Deterministic FFmpeg rawvideo decode (16-bit `bgr48le` automatically for 10-bit PQ/HLG sources; 8-bit `bgr24` for 8-bit sources — zero macOS AVFoundation HDR corruption)
 - Adaptive non-subject background DP temporal alignment + DIS optical-flow half-frame synthesis + ECC Euclidean registration
-- Multi-subject + shadow replacement mask (or `--mask-mode ellipse` for tight single-subject paths)
+- Multi-subject + shadow replacement mask (`auto_contour`, or `--mask-mode ellipse`), optionally refined with **SAM 2.1 Tiny ONNX** semantic edges and **Depth Anything V2 ONNX** foreground occluder subtraction (`--use-onnx`)
 - Temporally smooth global color grading (`full-graded-with-audio.mp4`)
 - Local collar tone match + 5-level Laplacian pyramid blend onto untouched original resolution background (`full-composited-with-audio.mp4`)
-- Dynamic source color-matrix passthrough (`zscale`) + lossless original AAC audio mux
+- Dynamic source color-matrix passthrough (`zscale`: Rec.709 / HLG / 10-bit PQ) + lossless original AAC audio mux
 
 ### Phase 5 — Quantitative & Visual QA
 Follow `references/qa-checklist.md`:

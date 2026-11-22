@@ -104,7 +104,23 @@ uv run vidrep upload ./jobs/demo --stage full --refs char-main,char-3q,scene-1-l
 uv run vidrep edit-submit ./jobs/demo --stage full --resolution 720p --prompt-file ./jobs/demo/prompt.txt
 uv run vidrep edit-wait ./jobs/demo --stage full
 uv run vidrep composite ./jobs/demo --stage full --mask-mode auto_contour
+
+# Optional P1 enhancement: auto-download & run local ONNX (SAM 2.1 Tiny matting + Depth Anything V2 occlusion guard)
+uv run vidrep models download --models all
+uv run vidrep composite ./jobs/demo --stage full --mask-mode auto_contour --use-onnx
 ```
+
+---
+
+## Local ONNX Matting, Occlusion Guard & 10-bit PQ HDR
+
+- **Auto-Downloaded Local ONNX (`vidrep models download` or `--use-onnx`)**:
+  - **SAM 2.1 Hiera Tiny** (`onnx-community/sam2.1-hiera-tiny-ONNX`, ~156 MB): refines subject boundaries to crisp semantic edges while keeping cast shadows & erased footprints intact.
+  - **Depth Anything V2 Small** (`onnx-community/depth-anything-v2-small`, ~99 MB): detects original foreground objects physically closer to the camera than the replaced subject (e.g., passing trees, lamp posts, railings) and automatically subtracts them from the replacement matte so they remain in front.
+  - Weights cache automatically to `~/.cache/vidrep/models/` with HuggingFace → `hf-mirror.com` fallback (configurable via `VIDREP_MODEL_CACHE_DIR` and `HF_ENDPOINT`).
+  - Intermediate frames between `--onnx-stride` keyframes are warped cleanly via bidirectional DIS optical flow.
+- **True 10-bit PQ (`smpte2084`) & 10-bit HLG Pipeline**:
+  - When a 10-bit source (`yuv420p10le`) is detected, `vidrep composite` automatically switches to **16-bit (`bgr48le`) raw decode → float32 Laplacian blending → 10-bit `yuv420p10le` + `zscale` encode**, preserving HDR highlight gradation without 8-bit banding.
 
 ---
 

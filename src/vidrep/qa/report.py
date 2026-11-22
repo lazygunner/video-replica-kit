@@ -24,6 +24,7 @@ def generate_qa_bundle(
     centroids: list[list[float]],
     fps: float,
     tag: str = "final",
+    onnx_diag: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -109,9 +110,53 @@ def generate_qa_bundle(
     p_hm = out_dir / f"{tag}-qa-heatmaps.jpg"
     cv2.imwrite(str(p_hm), np.hstack([hm_raw, hm_grd, hm_cmp]), [int(cv2.IMWRITE_JPEG_QUALITY), 92])
 
-    return {
+    qa_out = {
         "contact_sheet": str(p_cs),
         "comparison_sheet": str(p_diag),
         "motion_5fps": str(p_mot),
         "heatmaps": str(p_hm),
     }
+
+    # 5. Optional ONNX diagnostic sheet (SAM2 crisp matte + Depth Anything V2 heatmap + occluder mask)
+    if onnx_diag and (onnx_diag.get("sam2_masks") or onnx_diag.get("depth_samples")):
+        sam_list = onnx_diag.get("sam2_masks")
+        dep_dict = onnx_diag.get("depth_samples") or {}
+        occ_list = onnx_diag.get("occluder_masks")
+        dep_keys = sorted(dep_dict.keys())
+        pick_gis = dep_keys[:: max(1, len(dep_keys) // 4)][:4] if dep_keys else sample_gis[:4]
+        onnx_rows = []
+        for gi in pick_gis:
+            t = gi / fps
+            t_orig = cv2.resize(orig_matched[gi], (384, 216))
+            cv2.putText(t_orig, f"ORIG {t:.2f}s", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            if gi in dep_dict:
+                dm = cv2.applyColorMap(np.clip(dep_dict[gi] * 255, 0, 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+                t_dep = cv2.resize(dm, (384, 216))
+                cv2.putText(t_dep, "DEPTH ANYTHING V2", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            else:
+                t_dep = np.zeros((216, 384, 3), dtype=np.uint8)
+
+            if sam_list is not None:
+                sm = np.clip(sam_list[gi] * 255, 0, 255).astype(np.uint8)
+                t_sam = cv2.resize(cv2.cvtColor(sm, cv2.COLOR_GRAY2BGR), (384, 216))
+                cv2.putText(t_sam, "SAM 2.1 MATTE", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 255, 120), 2)
+            else:
+                t_sam = np.zeros((216, 384, 3), dtype=np.uint8)
+
+            ov = comp_frames[gi].copy()
+            # Green = final replace mask, Blue = detected closer occluders kept in front
+            g_ch = np.zeros_like(ov); g_ch[:, :, 1] = 255
+            ov = np.clip(ov * (1.0 - 0.35 * masks[gi][:, :, None]) + g_ch * (0.35 * masks[gi][:, :, None]), 0, 255).astype(np.uint8)
+            if occ_list is not None:
+                b_ch = np.zeros_like(ov); b_ch[:, :, 0] = 255
+                ov = np.clip(ov * (1.0 - 0.55 * occ_list[gi][:, :, None]) + b_ch * (0.55 * occ_list[gi][:, :, None]), 0, 255).astype(np.uint8)
+            t_ov = cv2.resize(ov, (384, 216))
+            cv2.putText(t_ov, "FINAL(G) + OCCLUDER(B)", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+            onnx_rows.append(np.hstack([t_orig, t_dep, t_sam, t_ov]))
+
+        p_onnx = out_dir / f"{tag}-qa-onnx-diagnostics.jpg"
+        cv2.imwrite(str(p_onnx), np.vstack(onnx_rows), [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        qa_out["onnx_diagnostics"] = str(p_onnx)
+
+    return qa_out

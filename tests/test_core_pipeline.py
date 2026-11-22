@@ -134,3 +134,66 @@ def test_ffmpeg_hlg_roundtrip_and_full_composite_pipeline(tmp_path: Path):
     dec_comp, _ = decode_video_frames(Path(comp_res["deliverables"]["composited"]))
     assert len(dec_comp) == len(gen_matched)
     assert len(dec_orig) == len(orig_frames)
+
+
+def test_10bit_pq_end_to_end_pipeline(tmp_path: Path):
+    """Verify genuine 10-bit PQ (yuv420p10le / bt2020nc / smpte2084) 16-bit decode -> composite -> 10-bit encode."""
+    orig_u8 = _make_synthetic_frames(n=12, w=320, h=180, replaced=False)
+    orig_u16 = [(f.astype(np.uint16) * 257) for f in orig_u8]
+    gen_u8 = _make_synthetic_frames(n=12, w=320, h=180, replaced=True)[::2]
+
+    p_orig = tmp_path / "orig_10bit_pq.mp4"
+    p_gen = tmp_path / "gen_8bit.mp4"
+    pq_profile = ColorProfile(
+        pix_fmt="yuv420p10le",
+        color_range="tv",
+        color_space="bt2020nc",
+        color_primaries="bt2020",
+        color_transfer="smpte2084",
+        is_hdr=True,
+        is_10bit=True,
+    )
+    encode_video_with_audio(orig_u16, 48.0, p_orig, pq_profile, crf=12, preset="ultrafast")
+    encode_video_with_audio(gen_u8, 24.0, p_gen, ColorProfile(), crf=14, preset="ultrafast")
+
+    info = probe_video_info(p_orig)
+    assert info["color_profile"]["is_10bit"] is True
+    assert info["color_transfer"] == "smpte2084"
+    assert "10" in info["pix_fmt"]
+
+    res = run_composite_pipeline(p_orig, p_gen, tmp_path / "pq_out", mask_mode="auto_contour", tag="pq10")
+    assert res["pipeline_bit_depth"] == 16
+    assert res["composited_probe"]["color_transfer"] == "smpte2084"
+    assert "10" in res["composited_probe"]["pix_fmt"]
+    assert res["bg_mae_composited_vs_orig"] < 1.5
+
+
+def test_onnx_sam2_and_depth_local_pipeline(tmp_path: Path):
+    """Verify local SAM 2.1 Tiny matting + Depth Anything V2 occlusion guard end-to-end."""
+    from vidrep.vfx.onnx_models import is_model_cached
+
+    if not (is_model_cached("depth") and is_model_cached("sam2")):
+        pytest.skip("ONNX models not pre-cached locally; run `vidrep models download` to enable.")
+
+    orig_frames = _make_synthetic_frames(n=6, w=320, h=180, replaced=False)
+    gen_frames = _make_synthetic_frames(n=6, w=320, h=180, replaced=True)
+    p_orig = tmp_path / "orig.mp4"
+    p_gen = tmp_path / "gen.mp4"
+    encode_video_with_audio(orig_frames, 24.0, p_orig, ColorProfile(), crf=14, preset="ultrafast")
+    encode_video_with_audio(gen_frames, 24.0, p_gen, ColorProfile(), crf=14, preset="ultrafast")
+
+    res = run_composite_pipeline(
+        p_orig,
+        p_gen,
+        tmp_path / "onnx_out",
+        mask_mode="auto_contour",
+        use_sam2=True,
+        use_depth=True,
+        onnx_stride=2,
+        tag="onnx",
+    )
+    assert res["segmentation"]["onnx"]["use_sam2"] is True
+    assert res["segmentation"]["onnx"]["use_depth"] is True
+    assert res["segmentation"]["onnx"]["sam2_mean_iou"] > 0.3
+    assert Path(res["qa_files"]["onnx_diagnostics"]).is_file()
+    assert res["bg_mae_composited_vs_orig"] < 1.5

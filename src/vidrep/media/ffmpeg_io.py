@@ -217,21 +217,27 @@ def decode_video_frames(
     video_path: Path,
     ffmpeg_bin: str = "",
     ffprobe_bin: str = "",
+    preserve_16bit: bool = False,
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
     """
-    Deterministic FFmpeg rawvideo BGR24 decode.
+    Deterministic FFmpeg rawvideo decode (BGR24 for 8-bit, BGR48LE uint16 when preserve_16bit=True on 10-bit HDR/PQ).
     Never uses cv2.VideoCapture so macOS AVFoundation cannot apply implicit HDR->SDR tone-mapping.
     """
     ff = require_ffmpeg(ffmpeg_bin)
     info = probe_video_info(video_path, ffmpeg_bin=ff, ffprobe_bin=ffprobe_bin)
     w, h = info["width"], info["height"]
-    cmd = [ff, "-v", "error", "-i", str(video_path), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    use_16 = bool(preserve_16bit and info.get("color_profile", {}).get("is_10bit"))
+    pix = "bgr48le" if use_16 else "bgr24"
+    dtype = np.uint16 if use_16 else np.uint8
+    bpc = 2 if use_16 else 1
+
+    cmd = [ff, "-v", "error", "-i", str(video_path), "-f", "rawvideo", "-pix_fmt", pix, "-"]
     raw = subprocess.check_output(cmd)
-    frame_bytes = w * h * 3
+    frame_bytes = w * h * 3 * bpc
     n = len(raw) // frame_bytes
     if n == 0:
         raise RuntimeError(f"Decoded 0 frames from {video_path}")
-    arr = np.frombuffer(raw[: n * frame_bytes], dtype=np.uint8).reshape(n, h, w, 3)
+    arr = np.frombuffer(raw[: n * frame_bytes], dtype=dtype).reshape(n, h, w, 3)
     return [arr[i].copy() for i in range(n)], info
 
 
@@ -245,11 +251,12 @@ def encode_video_with_audio(
     preset: str = "slow",
     ffmpeg_bin: str = "",
 ) -> Path:
-    """Single-pass rawvideo pipe encode with dynamic color-matrix passthrough and optional lossless AAC mux."""
+    """Single-pass rawvideo pipe encode (8-bit bgr24 or 16-bit bgr48le -> 10-bit PQ/HLG) + lossless AAC mux."""
     ff = require_ffmpeg(ffmpeg_bin)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     h, w = frames[0].shape[:2]
+    in_pix = "bgr48le" if frames[0].dtype == np.uint16 else "bgr24"
 
     has_audio = False
     if audio_source and Path(audio_source).is_file():
@@ -259,7 +266,7 @@ def encode_video_with_audio(
     cmd = [
         ff, "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
-        "-s", f"{w}x{h}", "-pix_fmt", "bgr24", "-r", f"{fps:.6f}",
+        "-s", f"{w}x{h}", "-pix_fmt", in_pix, "-r", f"{fps:.6f}",
         "-i", "-",
     ]
     if has_audio and audio_source:
