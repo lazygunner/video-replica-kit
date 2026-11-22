@@ -17,7 +17,7 @@ def submit_ark_edit(
     state: JobState,
     cfg: VidrepConfig,
     stage: str,
-    video_url: str,
+    video_url: str | None,
     image_urls: list[str],
     prompt_text: str,
     resolution: str | None = None,
@@ -26,10 +26,15 @@ def submit_ark_edit(
     skip_preview_gate: bool = False,
     force_resubmit: bool = False,
     generate_audio: bool = False,
+    mode: str = "edit",
+    ratio: str = "adaptive",
+    duration: int = -1,
 ) -> dict[str, Any]:
-    """Submit exactly ONE Seedance edit task per stage ('preview' or 'full') with budget/duplicate locks."""
+    """Submit exactly ONE Seedance task per stage ('preview' or 'full') in 'edit' or 'multi_ref' mode."""
     if stage not in ("preview", "full"):
         raise ValueError("stage must be 'preview' or 'full'")
+    if mode not in ("edit", "multi_ref"):
+        raise ValueError("mode must be 'edit' or 'multi_ref'")
 
     chosen_model = (model_id or cfg.ark.video_model).strip()
     cfg.assert_video_model_allowed(chosen_model, allow_non_flash=allow_non_flash)
@@ -43,23 +48,25 @@ def submit_ark_edit(
     if not cfg.ark.api_key:
         raise ValueError("Missing ARK_API_KEY.")
 
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text.strip()}]
+    if mode == "edit":
+        if not video_url:
+            raise ValueError("mode='edit' requires video_url.")
+        content.append({"type": "video_url", "video_url": {"url": video_url}, "role": "reference_video"})
+    for u in image_urls:
+        content.append({"type": "image_url", "image_url": {"url": u}, "role": "reference_image"})
+
     body: dict[str, Any] = {
         "model": chosen_model,
-        "content": [
-            {"type": "text", "text": prompt_text.strip()},
-            {"type": "video_url", "video_url": {"url": video_url}, "role": "reference_video"},
-        ]
-        + [
-            {"type": "image_url", "image_url": {"url": u}, "role": "reference_image"}
-            for u in image_urls
-        ],
-        "omni_reference_task_type": "edit",
+        "content": content,
         "resolution": chosen_res,
-        "ratio": "adaptive",
-        "duration": -1,
+        "ratio": ratio,
+        "duration": duration,
         "generate_audio": generate_audio,
         "watermark": False,
     }
+    if mode == "edit":
+        body["omni_reference_task_type"] = "edit"
 
     state.acquire_submission_lock(stage, {"model": chosen_model, "resolution": chosen_res}, force=force_resubmit)
     req_file = state.job_dir / f"request-{stage}.json"

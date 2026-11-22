@@ -82,6 +82,7 @@ def run_composite_pipeline(
     use_depth: bool = False,
     onnx_stride: int = 0,
     depth_margin: float = 0.14,
+    audio_source_mode: str = "auto",
     ffmpeg_bin: str = "",
     ffprobe_bin: str = "",
     tag: str = "final",
@@ -211,20 +212,34 @@ def run_composite_pipeline(
     out_comp = out_dir / f"{tag}-composited-with-audio.mp4"
     out_raw_audio = out_dir / f"{tag}-raw-with-audio.mp4"
 
-    encode_video_with_audio(graded_out_frames, fps_g, out_graded, color_profile, audio_source=orig_video, ffmpeg_bin=ff)
-    encode_video_with_audio(comp_out_frames, fps_g, out_comp, color_profile, audio_source=orig_video, ffmpeg_bin=ff)
+    # Choose audio track: 'auto' prefers generated audio when present (e.g. generate_audio=True dialogue dubbing)
+    if audio_source_mode == "gen":
+        chosen_audio_src = gen_video if gen_info.get("has_audio") else None
+    elif audio_source_mode == "orig":
+        chosen_audio_src = orig_video if orig_info.get("has_audio") else None
+    else:
+        chosen_audio_src = gen_video if gen_info.get("has_audio") else (orig_video if orig_info.get("has_audio") else None)
 
-    if orig_info.get("has_audio"):
-        subprocess.run(
-            [
-                ff, "-y", "-i", str(gen_video), "-i", str(orig_video),
-                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "copy",
-                "-shortest", "-movflags", "+faststart", str(out_raw_audio),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+    encode_video_with_audio(graded_out_frames, fps_g, out_graded, color_profile, audio_source=chosen_audio_src, ffmpeg_bin=ff)
+    encode_video_with_audio(comp_out_frames, fps_g, out_comp, color_profile, audio_source=chosen_audio_src, ffmpeg_bin=ff)
+
+    if chosen_audio_src is not None:
+        if chosen_audio_src == gen_video:
+            subprocess.run(
+                [ff, "-y", "-i", str(gen_video), "-c", "copy", "-movflags", "+faststart", str(out_raw_audio)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+        else:
+            subprocess.run(
+                [
+                    ff, "-y", "-i", str(gen_video), "-i", str(orig_video),
+                    "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "copy",
+                    "-shortest", "-movflags", "+faststart", str(out_raw_audio),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
 
     probe_grad = probe_video_info(out_graded, ffmpeg_bin=ff, ffprobe_bin=ffprobe_bin)
     probe_comp = probe_video_info(out_comp, ffmpeg_bin=ff, ffprobe_bin=ffprobe_bin)

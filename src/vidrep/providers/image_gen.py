@@ -14,9 +14,17 @@ from ..config import VidrepConfig
 
 
 def _to_data_url(p: Path) -> str:
+    raw = p.read_bytes()
     ext = p.suffix.lower()
+    if len(raw) > 1_800_000:
+        import cv2
+        img = cv2.imread(str(p))
+        if img is not None:
+            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            if ok:
+                return f"data:image/jpeg;base64,{base64.b64encode(buf.tobytes()).decode('ascii')}"
     mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
-    return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode('ascii')}"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def generate_reference_image(
@@ -52,7 +60,7 @@ def generate_reference_image(
         elif len(refs) > 1:
             img_field = [_to_data_url(p) for p in refs]
 
-        last_err = ""
+        errors: list[str] = []
         for model in models:
             size = "2K" if "5-5" in model else "2k"
             body: dict[str, Any] = {
@@ -79,10 +87,10 @@ def generate_reference_image(
                 return {"provider": "seedream", "model": model, "output_path": str(out_path), "aspect_ratio": aspect_ratio}
             except urllib.error.HTTPError as e:
                 err_text = e.read().decode("utf-8", errors="replace")
-                last_err = f"HTTP {e.code} on {model}: {err_text[:400]}"
+                errors.append(f"HTTP {e.code} on {model}: {err_text[:400]}")
             except Exception as e:
-                last_err = f"{model}: {e}"
-        raise RuntimeError(f"Seedream image generation failed: {last_err}")
+                errors.append(f"{model}: {e}")
+        raise RuntimeError("Seedream image generation failed: " + " | ".join(errors))
 
     if provider == "gemini":
         if not cfg.gemini_api_key:

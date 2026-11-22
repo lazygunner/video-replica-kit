@@ -150,13 +150,14 @@ def cmd_upload(args: argparse.Namespace) -> dict[str, Any]:
     cfg = load_config()
     st = JobState(Path(args.job_dir))
     files: dict[str, Path] = {}
-    if args.stage == "preview":
-        clip = (st.data.get("preview_clip") or {}).get("path")
-        if not clip:
-            raise RuntimeError("No preview clip found. Run `vidrep slice-preview` first.")
-        files["video"] = Path(clip)
-    else:
-        files["video"] = Path(st.data["source_video"])
+    if not args.refs_only:
+        if args.stage == "preview":
+            clip = (st.data.get("preview_clip") or {}).get("path")
+            if not clip:
+                raise RuntimeError("No preview clip found. Run `vidrep slice-preview` first.")
+            files["video"] = Path(clip)
+        else:
+            files["video"] = Path(st.data["source_video"])
 
     ref_list = [x.strip() for x in (args.refs or "").split(",") if x.strip()]
     for idx, item in enumerate(ref_list, start=1):
@@ -181,17 +182,17 @@ def cmd_edit_submit(args: argparse.Namespace) -> dict[str, Any]:
     cfg = load_config()
     st = JobState(Path(args.job_dir))
     ups = (st.data.get("uploads") or {}).get(args.stage)
-    if not ups or "video" not in ups:
+    if not ups or (args.mode == "edit" and "video" not in ups):
         raise RuntimeError(f"No uploaded assets for stage '{args.stage}'. Run `vidrep upload --stage {args.stage}` first.")
     prompt_text = Path(args.prompt_file).read_text(encoding="utf-8").strip() if args.prompt_file else (args.prompt or "")
     if not prompt_text:
         raise ValueError("Provide --prompt or --prompt-file.")
-    img_urls = [v["url"] for k, v in sorted(ups.items()) if k.startswith("ref_")]
+    img_urls = [v["url"] for k, v in sorted(ups.items(), key=lambda kv: int(kv[0].split("_")[1]) if kv[0].startswith("ref_") else 999) if k.startswith("ref_")]
     return submit_ark_edit(
         state=st,
         cfg=cfg,
         stage=args.stage,
-        video_url=ups["video"]["url"],
+        video_url=ups["video"]["url"] if "video" in ups else None,
         image_urls=img_urls,
         prompt_text=prompt_text,
         resolution=args.resolution,
@@ -200,6 +201,9 @@ def cmd_edit_submit(args: argparse.Namespace) -> dict[str, Any]:
         skip_preview_gate=args.skip_preview_gate,
         force_resubmit=args.force_resubmit,
         generate_audio=args.generate_audio,
+        mode=args.mode,
+        ratio=args.ratio,
+        duration=args.duration,
     )
 
 
@@ -235,6 +239,7 @@ def cmd_composite(args: argparse.Namespace) -> dict[str, Any]:
         use_depth=bool(args.use_onnx or args.use_depth),
         onnx_stride=args.onnx_stride,
         depth_margin=args.depth_margin,
+        audio_source_mode=args.audio_source,
         ffmpeg_bin=cfg.ffmpeg_bin,
         ffprobe_bin=cfg.ffprobe_bin,
         tag=stage,
@@ -310,15 +315,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("job_dir")
     sp.add_argument("--stage", required=True, choices=["preview", "full"])
     sp.add_argument("--refs", required=True, help="Comma-separated reference image aliases or paths in exact prompt order.")
+    sp.add_argument("--refs-only", action="store_true", help="Upload only reference images (for pure multi_ref generation without reference_video).")
     sp.set_defaults(func=cmd_upload)
 
-    sp = sub.add_parser("edit-submit", help="Submit one idempotent Ark Seedance edit task (Flash allowlisted by default).")
+    sp = sub.add_parser("edit-submit", help="Submit one idempotent Ark Seedance task (Flash allowlisted by default).")
     sp.add_argument("job_dir")
     sp.add_argument("--stage", required=True, choices=["preview", "full"])
     sp.add_argument("--prompt")
     sp.add_argument("--prompt-file")
     sp.add_argument("--resolution", choices=["480p", "720p", "1080p"])
     sp.add_argument("--model")
+    sp.add_argument("--mode", default="edit", choices=["edit", "multi_ref"], help="edit (with reference_video) or multi_ref (pure AI reference_images).")
+    sp.add_argument("--ratio", default="adaptive", help="Output aspect ratio (e.g. adaptive, 9:16, 16:9).")
+    sp.add_argument("--duration", type=int, default=-1, help="Output duration in seconds (-1 = match reference_video in edit mode).")
     sp.add_argument("--allow-non-flash", action="store_true")
     sp.add_argument("--skip-preview-gate", action="store_true")
     sp.add_argument("--force-resubmit", action="store_true")
@@ -344,6 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--use-depth", action="store_true", help="Enable local Depth Anything V2 ONNX foreground occlusion detection.")
     sp.add_argument("--onnx-stride", type=int, default=0, help="Run ONNX every N frames and propagate via optical flow (0 = auto).")
     sp.add_argument("--depth-margin", type=float, default=0.14, help="Relative depth threshold above subject depth to classify closer foreground occluders.")
+    sp.add_argument("--audio-source", default="auto", choices=["auto", "orig", "gen"], help="Audio track to mux: auto (prefers generated audio if present), orig, or gen.")
     sp.set_defaults(func=cmd_composite)
 
     sp = sub.add_parser("models", help="Check or pre-download local ONNX models (SAM 2.1 Tiny + Depth Anything V2 Small).")
