@@ -15,10 +15,11 @@ Use this skill whenever the user wants to recreate a reference video by replacin
 ## Non-Negotiable Guardrails
 
 1. **Flash-Only Default**: Always use `doubao-seedance-2-5-flash-261115` unless the user explicitly approves another model (`--allow-non-flash`).
-2. **Short Low-Res Pre-Validation First**: Before running a full-length `720p` edit, ALWAYS slice a representative `2.0–3.0s` clip (`vidrep slice-preview`) and validate with `480p` Flash (`--stage preview`). Only run `--stage full --resolution 720p` after the user approves the preview QA frames.
-3. **Single Billable POST Discipline**: Never retry a submitted video generation task blindly. `vidrep edit-submit` enforces a lockfile per stage to prevent accidental double billing.
-4. **Never Blindly Tone-Map HDR/HLG Inputs**: If `vidrep probe` reports `is_hdr: true` (e.g., `bt2020nc / arib-std-b67 HLG`), feed the unmodified source video to the edit API and let `vidrep composite` restore exact color signaling via `zscale` on export.
+2. **Short Low-Res Pre-Validation First**: Before running a full-length `720p` edit, ALWAYS slice a representative `~4.2s` clip (`vidrep slice-preview`, auto-pads `<4.0s` single shots via `tpad` to satisfy Ark `edit` mode's `[4, 30]s` rule) and validate with `480p` Flash (`--stage preview`). Only run `--stage full --resolution 720p` after the user approves the preview QA frames.
+3. **Single Billable POST Discipline**: Never retry a submitted video generation task blindly. `vidrep edit-submit` enforces a lockfile per stage to prevent accidental double billing (synchronous HTTP 4xx rejections with 0 tokens billed automatically mark the lock `rejected_4xx` for safe retry after fixing parameters).
+4. **Never Blindly Tone-Map HDR/HLG Inputs**: If `vidrep probe` reports `is_hdr: true` (e.g., `bt2020nc / arib-std-b67 HLG` or `smpte2084` 10-bit PQ), feed the unmodified source video to the edit API and let `vidrep composite` restore exact color signaling via `zscale` on export.
 5. **Visual Inspection Before Every Gate**: Never pass an uninspected generated image or video frame to the next stage. Visually inspect every reference image and QA sheet first.
+6. **Zero-Face Compliant Fallback (`--mode multi_ref`)**: If the source video or photorealistic human references contain identifiable real faces and trigger platform privacy checks (`InputVideoSensitiveContentDetected.PrivacyInformation`), NEVER bypass checks — switch to `--mode multi_ref --refs-only` using zero-human product/creature, empty-scene, and wardrobe flat-lay references with text-driven characters and `--generate-audio`.
 
 ## Running the `vidrep` CLI
 
@@ -65,9 +66,9 @@ Rules:
 > **GATE 1 — Pause & Confirm with User**: Show the generated character/creature reference(s) and pixel-locked scene keyframe(s). Confirm visual design, scale, and posture before spending any video tokens.
 
 ### Phase 2 — Short Clip + 480p Flash Pre-Validation (Gate 2)
-1. Pick the hardest / most informative `2.0–3.0s` segment (peak motion, lighting change, or subject interaction) and slice it:
+1. Pick the hardest / most informative `~4.2s` segment (peak motion, lighting change, or subject interaction) and slice it:
    ```bash
-   $VIDREP slice-preview ./jobs/<name> --start <sec> --duration 2.5
+   $VIDREP slice-preview ./jobs/<name> --start <sec> --duration 4.2
    ```
 2. Write `<job_dir>/prompt.txt` following `references/prompt-patterns.md`:
    - Explicitly assign roles to `视频1` and every `图片1..N` (`图片N` scene refs are explicitly marked "不作为首帧，不复制为静止画面").
@@ -79,8 +80,9 @@ Rules:
    $VIDREP upload ./jobs/<name> --stage preview --refs char-main,char-struct,scene-1-locked,scene-2-locked
    $VIDREP edit-submit ./jobs/<name> --stage preview --resolution 480p --prompt-file ./jobs/<name>/prompt.txt
    $VIDREP edit-wait ./jobs/<name> --stage preview
-   $VIDREP composite ./jobs/<name> --stage preview
+   $VIDREP composite ./jobs/<name> --stage preview --use-onnx
    ```
+   > **Spoken Dialogue / Commercial TVC / Zero-Face Multi-Ref Mode**: Add `--generate-audio` for synchronized native speech & SFX (`vidrep composite --audio-source auto` automatically preserves generated audio). When recreating human-face TVC/drama scenes without uploading real-person media, use `--refs-only` + `--mode multi_ref --ratio 9:16 --duration 12 --generate-audio` with zero-face product/creature, empty-room, and wardrobe flat-lay references.
 4. Visually inspect `preview-out/preview-qa-comparison.jpg` and `preview-out/preview-qa-motion-5fps.jpg`.
 
 > **GATE 2 — Pause & Confirm with User**: Report preview posture, mechanical motion, silhouette stability, and lighting integration. If flawed, fix references/prompt first; only proceed to Phase 3 once preview passes.

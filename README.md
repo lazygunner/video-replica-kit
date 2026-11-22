@@ -91,23 +91,25 @@ uv run vidrep pixel-lock ./jobs/demo \
   --orig ./jobs/demo/keyframes/orig-keyframe-1-*.png \
   --edited ./jobs/demo/refs/scene-1-raw.png --name scene-1-locked
 
-# 2. Mandatory low-cost short 480p preview validation (Gate 2)
-uv run vidrep slice-preview ./jobs/demo --start 2.0 --duration 2.5
+# 2. Mandatory low-cost short 480p preview validation (Gate 2; Ark edit requires >=4.0s)
+uv run vidrep slice-preview ./jobs/demo --start 2.0 --duration 4.2
 uv run vidrep upload ./jobs/demo --stage preview --refs char-main,char-3q,scene-1-locked
 uv run vidrep edit-submit ./jobs/demo --stage preview --resolution 480p --prompt-file ./jobs/demo/prompt.txt
 uv run vidrep edit-wait ./jobs/demo --stage preview
-uv run vidrep composite ./jobs/demo --stage preview
+uv run vidrep composite ./jobs/demo --stage preview --use-onnx
 # -> Inspect ./jobs/demo/preview-out/preview-qa-comparison.jpg & preview-qa-motion-5fps.jpg
 
 # 3. Full-length 720p Flash edit + 1080p original-background restoration
 uv run vidrep upload ./jobs/demo --stage full --refs char-main,char-3q,scene-1-locked
 uv run vidrep edit-submit ./jobs/demo --stage full --resolution 720p --prompt-file ./jobs/demo/prompt.txt
 uv run vidrep edit-wait ./jobs/demo --stage full
-uv run vidrep composite ./jobs/demo --stage full --mask-mode auto_contour
-
-# Optional P1 enhancement: auto-download & run local ONNX (SAM 2.1 Tiny matting + Depth Anything V2 occlusion guard)
-uv run vidrep models download --models all
 uv run vidrep composite ./jobs/demo --stage full --mask-mode auto_contour --use-onnx
+
+# Optional: Zero-face multi-reference TVC / short-drama mode with native synced Chinese speech & SFX
+uv run vidrep upload ./jobs/tvc --stage preview --refs-only --refs ref_product,ref_room,ref_outfit
+uv run vidrep edit-submit ./jobs/tvc --stage preview --mode multi_ref --resolution 480p \
+  --ratio 9:16 --duration 12 --generate-audio --prompt-file ./jobs/tvc/prompt.txt
+uv run vidrep edit-wait ./jobs/tvc --stage preview
 ```
 
 ---
