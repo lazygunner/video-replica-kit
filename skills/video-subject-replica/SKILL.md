@@ -1,122 +1,72 @@
 ---
 name: video-subject-replica
-description: >-
-  End-to-end reference video subject-replacement workflow using Seedance 2.5 Flash
-  (doubao-seedance-2-5-flash-261115) with pixel-locked reference images, mandatory
-  short 480p pre-validation, and automated high-resolution original-background
-  compositing + color-space passthrough. Works identically across Antigravity,
-  Claude Code, OpenAI Codex, Cursor, and standalone CLI via `vidrep`.
+description: 基于 Seedance 2.5 Flash 与本地 ONNX（SAM 2.1 + Depth Anything V2）的参考视频主体复刻与自动化调色合成工作流，支持像素锁定参考图、480p 预验证、10-bit PQ/HLG 色彩无损透传与零人像多图音画同步生成。
 ---
 
-# Reference Video Subject Replacement (`video-subject-replica`)
+# 视频复刻调色（`video-subject-replica`）
 
-Use this skill whenever the user wants to recreate a reference video by replacing one or more foreground subjects (characters, creatures/monsters, vehicles, props, products) while preserving the original video's camera motion, framing, pacing, background textures, lighting, and audio.
+当用户需要复刻参考视频、替换其中的前景主体（人物、神话生物/怪物、载具、商品或道具）并保留原片运镜、构图、背景纹理、光影色调与音频时使用本 Skill。跨平台兼容 Antigravity、Claude Code、OpenAI Codex、Cursor 及独立 CLI（`vidrep`）。
 
-## Non-Negotiable Guardrails
+## 不可妥协的护栏
 
-1. **Flash-Only Default**: Always use `doubao-seedance-2-5-flash-261115` unless the user explicitly approves another model (`--allow-non-flash`).
-2. **Short Low-Res Pre-Validation First**: Before running a full-length `720p` edit, ALWAYS slice a representative `~4.2s` clip (`vidrep slice-preview`, auto-pads `<4.0s` single shots via `tpad` to satisfy Ark `edit` mode's `[4, 30]s` rule) and validate with `480p` Flash (`--stage preview`). Only run `--stage full --resolution 720p` after the user approves the preview QA frames.
-3. **Single Billable POST Discipline**: Never retry a submitted video generation task blindly. `vidrep edit-submit` enforces a lockfile per stage to prevent accidental double billing (synchronous HTTP 4xx rejections with 0 tokens billed automatically mark the lock `rejected_4xx` for safe retry after fixing parameters).
-4. **Never Blindly Tone-Map HDR/HLG Inputs**: If `vidrep probe` reports `is_hdr: true` (e.g., `bt2020nc / arib-std-b67 HLG` or `smpte2084` 10-bit PQ), feed the unmodified source video to the edit API and let `vidrep composite` restore exact color signaling via `zscale` on export.
-5. **Visual Inspection Before Every Gate**: Never pass an uninspected generated image or video frame to the next stage. Visually inspect every reference image and QA sheet first.
-6. **Zero-Face Compliant Fallback (`--mode multi_ref`)**: If the source video or photorealistic human references contain identifiable real faces and trigger platform privacy checks (`InputVideoSensitiveContentDetected.PrivacyInformation`), NEVER bypass checks — switch to `--mode multi_ref --refs-only` using zero-human product/creature, empty-scene, and wardrobe flat-lay references with text-driven characters and `--generate-audio`.
+1. **默认仅用 Flash 模型**：始终使用 `doubao-seedance-2-5-flash-261115`，除非用户明确授权切换（`--allow-non-flash`）。
+2. **先做短片 480p 预验证**：全片 `720p` 前必须先切 `~4.2s` 片段（`vidrep slice-preview`，不足 4s 自动 `tpad` 补齐以满足 Ark `edit` 模式 `[4, 30]s` 限制）跑 `480p` 预验证，经用户确认后再跑全片。
+3. **单次计费幂等锁**：严禁盲目重试提交；`vidrep edit-submit` 每阶段写锁防重复扣费（同步 HTTP 4xx 零扣费驳回自动解锁）。
+4. **禁止盲目 HDR→SDR 色调映射**：检测到 HDR/HLG/10-bit PQ 源片时直接原片送编辑，由 `vidrep composite` 通过 `zscale` 无损恢复色彩矩阵与 VUI 标签。
+5. **每道门禁必须人工审图/审片**：绝不跳过视觉检查直接进入下一阶段。
+6. **零人像合规降级（`--mode multi_ref`）**：若原视频或写实人像触发平台真人隐私检测（`PrivacyInformation`），禁止任何规避/打码绕过，改为 `--refs-only --mode multi_ref --generate-audio`，仅传商品/生物、纯空景与服装平铺静物图，由文字驱动人物与同步配音。
 
-## Running the `vidrep` CLI
-
-Invoke `vidrep` via `uv` from the `video-replica-kit` repository root (or directly if installed globally via `uv tool install`):
+## 调用方式
 
 ```bash
 VIDREP="uv run --project /path/to/video-replica-kit vidrep"
 $VIDREP preflight
 ```
 
-Every subcommand prints structured JSON to stdout and updates `<job_dir>/state.json`.
-
 ---
 
-## Standard 5-Phase Workflow
+## 五阶段标准工作流
 
-### Phase 0 — Preflight & Forensic Source Probe
-1. Run `vidrep preflight` to verify `ffmpeg`, credentials (`ARK_API_KEY`, `TOS_*`), and the Flash-only allowlist.
-2. Initialize and probe the reference video:
-   ```bash
-   $VIDREP init ./jobs/<name> --source /path/to/reference.mp4
-   $VIDREP probe ./jobs/<name> --keyframes 0.22,0.68
-   ```
-3. Visually inspect `<job_dir>/reference-contact-sheet.jpg` and the extracted keyframes.
-   - Check `shot_count`: if multi-shot (`> 1`), confirm with the user which shot(s) to replace and work shot-by-shot.
-   - Check camera angle(s), subject proportions, lighting direction, cast shadows, and any foreground occluders passing in front of the subject.
-   - Read `references/color-pipelines.md` if `color_profile.is_hdr` is `true`.
-
-### Phase 1 — Reference Image Engineering + Pixel-Lock (Gate 1)
-Consult `references/prompt-patterns.md` to choose the right reference set for the replacement archetype (single subject, character+vehicle, character+creature/monster, or product/prop).
-
-Rules:
-- **Match the dominant camera angle first**: Generate clean studio single-view subject reference(s) matching the main shot angle (e.g., straight-behind or 3/4 view) on neutral studio background. Never use split multi-view collage sheets (they induce split-screen artifacts in video models).
-- **Consistent secondary structural angle**: When mechanical/anatomy details are occluded in the primary angle, generate a second studio angle referencing the first image (`--ref`).
-- **1–2 Pixel-Locked Scene Keyframes**: Edit the sharp original keyframes extracted in Phase 0 (`--ref orig_kf --ref subject_ref`), varying action phase across keyframes so the model understands motion. Then ALWAYS pixel-lock each edited scene keyframe back onto untouched original pixels:
-  ```bash
-  $VIDREP pixel-lock ./jobs/<name> \
-    --orig ./jobs/<name>/keyframes/orig-keyframe-1-*.png \
-    --edited ./jobs/<name>/refs/scene-1-raw.png \
-    --name scene-1-locked
-  ```
-  Verify `outer_bg_mae_after < 0.05` and visually inspect the locked frame.
-
-> **GATE 1 — Pause & Confirm with User**: Show the generated character/creature reference(s) and pixel-locked scene keyframe(s). Confirm visual design, scale, and posture before spending any video tokens.
-
-### Phase 2 — Short Clip + 480p Flash Pre-Validation (Gate 2)
-1. Pick the hardest / most informative `~4.2s` segment (peak motion, lighting change, or subject interaction) and slice it:
-   ```bash
-   $VIDREP slice-preview ./jobs/<name> --start <sec> --duration 4.2
-   ```
-2. Write `<job_dir>/prompt.txt` following `references/prompt-patterns.md`:
-   - Explicitly assign roles to `视频1` and every `图片1..N` (`图片N` scene refs are explicitly marked "不作为首帧，不复制为静止画面").
-   - **Explicitly release conflicting original subject pose/silhouette constraints** ("允许彻底改变原主体的身形、姿态与动作轨迹...").
-   - Describe concrete observable mechanics rather than vague adjectives.
-   - Specify conflict resolution priority (background/camera/color -> `视频1`; new subject design/anatomy -> studio `图片`).
-3. Upload preview clip + references in exact prompt order, submit ONCE at `480p`, wait, and run preview QA:
-   ```bash
-   $VIDREP upload ./jobs/<name> --stage preview --refs char-main,char-struct,scene-1-locked,scene-2-locked
-   $VIDREP edit-submit ./jobs/<name> --stage preview --resolution 480p --prompt-file ./jobs/<name>/prompt.txt
-   $VIDREP edit-wait ./jobs/<name> --stage preview
-   $VIDREP composite ./jobs/<name> --stage preview --use-onnx
-   ```
-   > **Spoken Dialogue / Commercial TVC / Zero-Face Multi-Ref Mode**: Add `--generate-audio` for synchronized native speech & SFX (`vidrep composite --audio-source auto` automatically preserves generated audio). When recreating human-face TVC/drama scenes without uploading real-person media, use `--refs-only` + `--mode multi_ref --ratio 9:16 --duration 12 --generate-audio` with zero-face product/creature, empty-room, and wardrobe flat-lay references.
-4. Visually inspect `preview-out/preview-qa-comparison.jpg` and `preview-out/preview-qa-motion-5fps.jpg`.
-
-> **GATE 2 — Pause & Confirm with User**: Report preview posture, mechanical motion, silhouette stability, and lighting integration. If flawed, fix references/prompt first; only proceed to Phase 3 once preview passes.
-
-### Phase 3 — Full-Length 720p Flash Edit
-1. Upload the full reference video + approved reference images (exact same order as prompt):
-   ```bash
-   $VIDREP upload ./jobs/<name> --stage full --refs char-main,char-struct,scene-1-locked,scene-2-locked
-   ```
-2. Submit ONE single full-length `720p` Flash edit and wait:
-   ```bash
-   $VIDREP edit-submit ./jobs/<name> --stage full --resolution 720p --prompt-file ./jobs/<name>/prompt.txt
-   $VIDREP edit-wait ./jobs/<name> --stage full
-   ```
-
-### Phase 4 — Automated High-Resolution Background Restoration & Color Passthrough
-Run deterministic finishing (zero additional API cost; safe to re-run with different `--mask-mode` or `--use-onnx` if needed):
+### 阶段 0：环境自检与原片拆解
 ```bash
-# Fast pure-CV mode:
-$VIDREP composite ./jobs/<name> --stage full --mask-mode auto_contour
+$VIDREP init ./jobs/<name> --source /path/to/reference.mp4
+$VIDREP probe ./jobs/<name> --keyframes 0.22,0.68
+```
+检查 `reference-contact-sheet.jpg`、`shot_count`（多镜头时与用户确认分镜策略）及 `color_profile.is_hdr`（HDR 详见 `references/color-pipelines.md`）。
 
-# High-precision local ONNX mode (auto-downloads SAM 2.1 Tiny matting + Depth Anything V2 occlusion guard):
+### 阶段 1：参考图工程与背景像素锁定（门禁 1）
+参考 `references/prompt-patterns.md` 准备参考图：
+- 生成匹配主镜头机位的灰底棚拍主体定妆图（单视角，禁用多视角拼图）；
+- 编辑 1–2 张关键帧并用 `pixel-lock` 锁回原片未改动背景像素（`outer_bg_mae_after < 0.05`）：
+  ```bash
+  $VIDREP pixel-lock ./jobs/<name> --orig ./jobs/<name>/keyframes/orig-keyframe-1-*.png --edited ./jobs/<name>/refs/scene-1-raw.png --name scene-1-locked
+  ```
+> **门禁 1**：展示参考图给用户确认造型、比例与质感后，再消耗视频 Token。
+
+### 阶段 2：短片 480p Flash 预验证（门禁 2）
+```bash
+$VIDREP slice-preview ./jobs/<name> --start <sec> --duration 4.2
+$VIDREP upload ./jobs/<name> --stage preview --refs ref1,ref2,scene-1-locked
+$VIDREP edit-submit ./jobs/<name> --stage preview --resolution 480p --prompt-file ./jobs/<name>/prompt.txt
+$VIDREP edit-wait ./jobs/<name> --stage preview
+$VIDREP composite ./jobs/<name> --stage preview --use-onnx
+```
+- 含中文口播/广告场景加 `--generate-audio`（`composite --audio-source auto` 自动保留生成音轨）；
+- 零人像多图模式加 `--refs-only` 与 `--mode multi_ref --ratio 9:16 --duration 12 --generate-audio`。
+> **门禁 2**：审阅 `preview-out/preview-qa-comparison.jpg` 与 `preview-qa-motion-5fps.jpg`，确认无误再升全片。
+
+### 阶段 3：全片 720p Flash 生成
+```bash
+$VIDREP upload ./jobs/<name> --stage full --refs ref1,ref2,scene-1-locked
+$VIDREP edit-submit ./jobs/<name> --stage full --resolution 720p --prompt-file ./jobs/<name>/prompt.txt
+$VIDREP edit-wait ./jobs/<name> --stage full
+```
+
+### 阶段 4：本地 ONNX 精抠、调色与原背景拉普拉斯融合
+```bash
 $VIDREP composite ./jobs/<name> --stage full --mask-mode auto_contour --use-onnx
 ```
-This automatically executes:
-- Deterministic FFmpeg rawvideo decode (16-bit `bgr48le` automatically for 10-bit PQ/HLG sources; 8-bit `bgr24` for 8-bit sources — zero macOS AVFoundation HDR corruption)
-- Adaptive non-subject background DP temporal alignment + DIS optical-flow half-frame synthesis + ECC Euclidean registration
-- Multi-subject + shadow replacement mask (`auto_contour`, or `--mask-mode ellipse`), optionally refined with **SAM 2.1 Tiny ONNX** semantic edges and **Depth Anything V2 ONNX** foreground occluder subtraction (`--use-onnx`)
-- Temporally smooth global color grading (`full-graded-with-audio.mp4`)
-- Local collar tone match + 5-level Laplacian pyramid blend onto untouched original resolution background (`full-composited-with-audio.mp4`)
-- Dynamic source color-matrix passthrough (`zscale`: Rec.709 / HLG / 10-bit PQ) + lossless original AAC audio mux
+自动执行：FFmpeg 确定性解码（10-bit 源片自动启用 16-bit 内部管线）→ DP 时序对齐 + DIS 光流半帧 + ECC 亚像素配准 → 双尺度多主体分割 + 自动下载 **SAM 2.1 Tiny** 精抠与 **Depth Anything V2** 前景遮挡扣除 → 时序平滑调色 + 5 层拉普拉斯融合 → `zscale` 原色彩矩阵回写与无损音轨封装。
 
-### Phase 5 — Quantitative & Visual QA
-Follow `references/qa-checklist.md`:
-1. Inspect `deliverables/full-qa-comparison.jpg`, `deliverables/full-qa-motion-5fps.jpg`, `deliverables/full-qa-heatmaps.jpg`, and `deliverables/full-metrics.json`.
-2. Check `segmentation.recommend_graded_fallback`: if `true` (e.g., >62% of frame changed or heavy foreground occlusion), explicitly recommend `full-graded-with-audio.mp4` alongside or instead of `full-composited-with-audio.mp4`.
-3. Report actual measured `ffprobe` specs, background MAE progression (`raw -> graded -> composited`), and honest remaining limitations.
+### 阶段 5：量化与视觉审片交付
+按 `references/qa-checklist.md` 核验 `full-qa-comparison.jpg`、`full-qa-motion-5fps.jpg`、`full-qa-heatmaps.jpg` 与 `full-metrics.json`（关注 `bg_mae_composited_vs_orig` 与 `recommend_graded_fallback`），如实汇报实测指标与交付路径。

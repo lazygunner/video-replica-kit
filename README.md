@@ -1,111 +1,101 @@
-# video-replica-kit (`vidrep`)
+# video-replica-kit（视频复刻调色 Skill & CLI）
 
-**Cross-agent universal reference video subject-replacement toolkit** — works seamlessly across **Antigravity**, **Claude Code**, **OpenAI Codex CLI**, **Cursor**, and **standalone Python CLI / CI**.
+简体中文 | [English](README.en.md)
 
-Built around one proven engineering principle:
+**跨平台通用的参考视频主体复刻与自动化调色合成工具包**，一套 Skill + Pure Python CLI（`vidrep`）无缝适配 **Antigravity、Claude Code、OpenAI Codex、Cursor** 与命令行。
 
-> **Use `doubao-seedance-2-5-flash-261115` for what generative video excels at** (semantic subject/creature/vehicle replacement, 3D perspective adaptation, continuous biomechanics, dynamic shadow lighting), **and use deterministic engineering for everything beyond the model's boundary** (pixel-locked scene references, 2–3s 480p pre-validation gates, monotonic DP + DIS optical-flow half-frame alignment, ECC Euclidean registration, 5-level Laplacian multi-band original-background restoration, and exact Rec.709/HLG/PQ color-space passthrough).
+核心思路：**让 `doubao-seedance-2-5-flash-261115` 专注它最擅长的语义主体替换、透视光影与音画生成，把模型边界之外的稳定性全部交给确定性工程**（像素锁定参考图、480p 低成本预验证、DP/DIS/ECC 对齐、本地 SAM 2.1 + Depth Anything V2 ONNX 精抠、5 层拉普拉斯原背景融合、10-bit PQ/HLG/Rec.709 `zscale` 无损色彩透传）。
 
 ---
 
-## Architecture
+## 一句话直接用（复制到 Agent 客户端即可）
+
+### 1. 一句话安装 Skill 到你的 Agent 客户端
+直接把下面这句话发给 **Antigravity / Claude Code / Codex / Cursor**：
 
 ```text
-Antigravity / Claude Code / Codex / Cursor   ──▶  skills/video-subject-replica/SKILL.md  (Open Agent Skill)
-                                                               │
-                                                               ▼
-Standalone CLI / Tapdance / CI               ──▶  vidrep CLI (Pure Python + uv, zero vendor lock-in)
-                                                    ├── preflight / init / probe / slice-preview
-                                                    ├── ref-gen (Seedream 5.5 / Gemini / local) + pixel-lock
-                                                    ├── upload (pure Python TOS) + edit-submit/wait (Flash lock)
-                                                    └── composite (DP + DIS + ECC + Laplacian + zscale) + QA
+请克隆 https://github.com/lazygunner/video-replica-kit.git 到本地，运行 ./install-skill.sh --target all --scope global 安装视频复刻调色 Skill，并执行 uv run vidrep preflight 检查环境与引导我配置 API Key。
 ```
+
+### 2. 一句话发起视频复刻（安装好 Skill 后直接复制使用）
+把方括号内容换成你的视频和需求，直接发给 Agent：
+
+```text
+使用 video-subject-replica skill 复刻参考视频【视频路径或链接】，把原视频中的【原主体】替换为【目标主体与风格要求】，严格保留原片运镜、场景和色调；先出参考图和 480p 短片预验证，我确认后再出 720p 并用本地 ONNX 精抠调色合成。
+```
+
+> **广告 / 短剧口播场景（含真人出镜、需换中文配音）可直接复制**：
+> ```text
+> 使用 video-subject-replica skill，参考视频【视频路径】的镜头节奏与剧情，把主角换成【新角色】，产品/元素换成【新元素】；若原视频含真人正脸，自动切换零人像 multi_ref 模式 + 原生中文配音，先出 480p 预验证给我审片。
+> ```
 
 ---
 
-## Quickstart
+## 30 秒快速配置
 
-### 1. Prerequisites & API Key Configuration (User-Supplied)
+### 1. 前置依赖
 - Python `>= 3.10` + [`uv`](https://docs.astral.sh/uv/)
-- `ffmpeg` (`brew install ffmpeg` on macOS; `ffprobe` optional — auto-falls back to `ffmpeg -i`)
-- **No API keys are bundled.** Configure your own Volcengine Ark API Key + Volcengine TOS credentials using any of the 3 standard methods (precedence: `ENV > .env > ~/.config/vidrep/config.toml`):
+- `ffmpeg`（macOS：`brew install ffmpeg`）
 
-**Option A — Project `.env` (recommended for local runs):**
+### 2. 配置自己的 API Key（仓库不含任何密钥）
+支持环境变量、项目 `.env` 或全局 `~/.config/vidrep/config.toml`（优先级：`ENV > .env > config.toml`）：
+
 ```bash
-cp .env.example .env
-# Edit .env and fill in ARK_API_KEY, TOS_ACCESS_KEY_ID, TOS_ACCESS_KEY_SECRET, TOS_BUCKET
+git clone https://github.com/lazygunner/video-replica-kit.git
+cd video-replica-kit
+mkdir -p ~/.config/vidrep && cp config.example.toml ~/.config/vidrep/config.toml
+# 编辑 ~/.config/vidrep/config.toml，填入你自己的 ARK_API_KEY 与 TOS 凭证
 uv run vidrep preflight
 ```
 
-**Option B — Global user config (`~/.config/vidrep/config.toml`, recommended when using the Skill across multiple projects):**
+`vidrep preflight` 返回 `"ok": true` 即准备就绪。
+
+### 3. 一键安装 Skill 到主流 Agent 客户端
 ```bash
-mkdir -p ~/.config/vidrep
-cp config.example.toml ~/.config/vidrep/config.toml
-# Edit ~/.config/vidrep/config.toml and fill in your own keys
-uv run vidrep preflight
-```
-
-**Option C — Shell environment variables:**
-```bash
-export ARK_API_KEY="your-ark-api-key"
-export TOS_ACCESS_KEY_ID="your-tos-ak"
-export TOS_ACCESS_KEY_SECRET="your-tos-sk"
-export TOS_BUCKET="your-public-read-bucket"
-uv run vidrep preflight
-```
-
-> `vidrep preflight` returns `"ok": true` once `ffmpeg`, `ARK_API_KEY`, and `TOS_*` are all configured (and never prints secret values).
-
-### 2. Install the Skill into Your AI Coding Agent(s)
-
-```bash
-# Install globally for Antigravity, Claude Code, Codex, and Cursor at once:
+# 全局安装到 Antigravity / Claude Code / Codex / Cursor
 ./install-skill.sh --target all --scope global
 
-# Or install into a specific project workspace:
+# 或仅安装到指定项目目录
 ./install-skill.sh --target all --scope project --project-dir /path/to/your/project
 ```
 
-Supported targets:
-- `antigravity` (`~/.gemini/config/skills/` or `<project>/.agents/skills/`)
-- `claude` (`~/.claude/skills/` or `<project>/.claude/skills/`)
-- `codex` (`~/.codex/skills/` or `<project>/.agents/skills/`)
-- `cursor` (`~/.cursor/skills/` or `<project>/.agents/skills/`)
+---
+
+## 核心能力一览
+
+| 模块 | 解决什么问题 |
+|---|---|
+| **Flash 专属白名单 + 计费锁** | 默认锁定 `doubao-seedance-2-5-flash-261115`，强制先跑 `~4.2s` `480p` 预验证（不足 4s 自动 `tpad` 补齐），单阶段幂等防重复扣费 |
+| **参考图工程 + 像素锁定** | 内置 Seedream 5.5 / Gemini / 本地图生图，自动把编辑后关键帧的外围背景像素锁回原片（`MAE < 0.05`） |
+| **零人像 `multi_ref` + 原生配音** | 支持 `--refs-only --mode multi_ref --generate-audio`，纯商品/空景/服装静物图合规生成音画同步的中文口播 TVC 与短剧 |
+| **本地 ONNX 精抠与前景遮挡** | `--use-onnx` 首次运行自动下载 **SAM 2.1 Tiny**（精抠）+ **Depth Anything V2 Small**（前景遮挡保护），支持多尺度双主体 |
+| **真 10-bit PQ/HLG 无损透传** | 绕开 macOS `cv2.VideoCapture` 的 AVFoundation 双重 HDR 偏色，16-bit 内部合成 + `zscale` 矩阵回写 Rec.709 / HLG / 10-bit PQ |
 
 ---
 
-## End-to-End CLI Workflow
+## CLI 常用命令速查
 
+### 模式 A：参考视频局部主体替换（`edit` + 本地 ONNX 原背景合成）
 ```bash
-# 0. Initialize & forensic probe (cuts, HDR check, 2fps contact sheet, sharpest keyframes)
+# 1. 初始化与原片拆解（分镜、HDR 检测、2fps 总览图、清晰关键帧）
 uv run vidrep init ./jobs/demo --source /path/to/reference.mp4
 uv run vidrep probe ./jobs/demo --keyframes 0.22,0.68
 
-# 1. Generate studio subject references + pixel-locked scene keyframes
-uv run vidrep ref-gen ./jobs/demo --name char-main --aspect 1:1 --prompt "..."
-uv run vidrep ref-gen ./jobs/demo --name char-3q --aspect 1:1 --ref ./jobs/demo/refs/char-main.png --prompt "..."
-uv run vidrep ref-gen ./jobs/demo --name scene-1-raw --aspect 16:9 \
-  --ref ./jobs/demo/keyframes/orig-keyframe-1-*.png \
-  --ref ./jobs/demo/refs/char-main.png --prompt "..."
-uv run vidrep pixel-lock ./jobs/demo \
-  --orig ./jobs/demo/keyframes/orig-keyframe-1-*.png \
-  --edited ./jobs/demo/refs/scene-1-raw.png --name scene-1-locked
+# 2. 生成定妆图并像素锁定关键帧
+uv run vidrep ref-gen ./jobs/demo --name subject --aspect 1:1 --prompt "..."
+uv run vidrep pixel-lock ./jobs/demo --orig ./jobs/demo/keyframes/orig-keyframe-1-*.png \
+  --edited ./jobs/demo/refs/scene-raw.png --name scene-locked
 
-# 2. Mandatory low-cost short 480p preview validation (Gate 2; Ark edit requires >=4.0s)
-uv run vidrep slice-preview ./jobs/demo --start 2.0 --duration 4.2
-uv run vidrep upload ./jobs/demo --stage preview --refs char-main,char-3q,scene-1-locked
+# 3. 低成本 480p 预验证（审片通过后再跑 --stage full --resolution 720p）
+uv run vidrep slice-preview ./jobs/demo --start 0.0 --duration 4.2
+uv run vidrep upload ./jobs/demo --stage preview --refs subject,scene-locked
 uv run vidrep edit-submit ./jobs/demo --stage preview --resolution 480p --prompt-file ./jobs/demo/prompt.txt
 uv run vidrep edit-wait ./jobs/demo --stage preview
 uv run vidrep composite ./jobs/demo --stage preview --use-onnx
-# -> Inspect ./jobs/demo/preview-out/preview-qa-comparison.jpg & preview-qa-motion-5fps.jpg
+```
 
-# 3. Full-length 720p Flash edit + 1080p original-background restoration
-uv run vidrep upload ./jobs/demo --stage full --refs char-main,char-3q,scene-1-locked
-uv run vidrep edit-submit ./jobs/demo --stage full --resolution 720p --prompt-file ./jobs/demo/prompt.txt
-uv run vidrep edit-wait ./jobs/demo --stage full
-uv run vidrep composite ./jobs/demo --stage full --mask-mode auto_contour --use-onnx
-
-# Optional: Zero-face multi-reference TVC / short-drama mode with native synced Chinese speech & SFX
+### 模式 B：零人像多图参考 + 中文音画同步（`multi_ref`）
+```bash
 uv run vidrep upload ./jobs/tvc --stage preview --refs-only --refs ref_product,ref_room,ref_outfit
 uv run vidrep edit-submit ./jobs/tvc --stage preview --mode multi_ref --resolution 480p \
   --ratio 9:16 --duration 12 --generate-audio --prompt-file ./jobs/tvc/prompt.txt
@@ -114,33 +104,9 @@ uv run vidrep edit-wait ./jobs/tvc --stage preview
 
 ---
 
-## Local ONNX Matting, Occlusion Guard & 10-bit PQ HDR
+## 目录与进阶文档
 
-- **Auto-Downloaded Local ONNX (`vidrep models download` or `--use-onnx`)**:
-  - **SAM 2.1 Hiera Tiny** (`onnx-community/sam2.1-hiera-tiny-ONNX`, ~156 MB): refines subject boundaries to crisp semantic edges while keeping cast shadows & erased footprints intact.
-  - **Depth Anything V2 Small** (`onnx-community/depth-anything-v2-small`, ~99 MB): detects original foreground objects physically closer to the camera than the replaced subject (e.g., passing trees, lamp posts, railings) and automatically subtracts them from the replacement matte so they remain in front.
-  - Weights cache automatically to `~/.cache/vidrep/models/` with HuggingFace → `hf-mirror.com` fallback (configurable via `VIDREP_MODEL_CACHE_DIR` and `HF_ENDPOINT`).
-  - Intermediate frames between `--onnx-stride` keyframes are warped cleanly via bidirectional DIS optical flow.
-- **True 10-bit PQ (`smpte2084`) & 10-bit HLG Pipeline**:
-  - When a 10-bit source (`yuv420p10le`) is detected, `vidrep composite` automatically switches to **16-bit (`bgr48le`) raw decode → float32 Laplacian blending → 10-bit `yuv420p10le` + `zscale` encode**, preserving HDR highlight gradation without 8-bit banding.
-
----
-
-## Built-in Safety Guardrails
-
-- **Flash-Only Model Allowlist**: Defaults strictly to `doubao-seedance-2-5-flash-261115`. Attempting to submit any other video model fails fast unless `--allow-non-flash` or `VIDREP_ALLOWED_VIDEO_MODELS` is explicitly set.
-- **Preview Gate**: `--stage full` refuses submission until `--stage preview` (`480p` short clip) succeeds (override only via explicit `--skip-preview-gate`).
-- **Anti-Duplicate Billing Lock**: Every stage writes a submission lockfile before calling Ark POST, preventing accidental duplicate charges on retries.
-- **Deterministic FFmpeg Color Pipeline**: Never relies on `cv2.VideoCapture` (avoiding macOS `AVFoundation` double HDR tone-mapping), and pairs `zscale` matrix encoding with source-matched VUI tags (`Rec.709`, `BT.2020/HLG`, or `BT.2020/PQ`).
-
----
-
-## Development & Tests
-
-```bash
-uv run --extra dev pytest -v
-```
-
-## License
-
-MIT
+- Skill 规范：[skills/video-subject-replica/SKILL.md](skills/video-subject-replica/SKILL.md)
+- 实战深度教程：[docs/tutorial-seedance-2.5-flash.md](docs/tutorial-seedance-2.5-flash.md)
+- 自动化测试：`uv run --extra dev pytest -v`
+- License：MIT
