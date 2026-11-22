@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "video-replica-kit"
+version = "0.1.0"
+description = "Cross-agent universal reference video subject-replacement toolkit (CLI + Open Agent Skill) for Seedance 2.5 Flash + high-fidelity 1080p background restoration."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26.0",
+  "opencv-python-headless>=4.9.0",
+  "pillow>=10.0.0",
+  "tos>=2.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+vidrep = "vidrep.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vidrep"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
