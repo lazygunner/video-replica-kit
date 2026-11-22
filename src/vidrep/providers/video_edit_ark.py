@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import time
 from typing import Any
+import urllib.error
 import urllib.request
 
 from ..config import VidrepConfig
@@ -71,8 +72,14 @@ def submit_ark_edit(
         headers={"Authorization": f"Bearer {cfg.ark.api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        task_data = json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            task_data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace")
+        if 400 <= exc.code < 500:
+            state.mark_submission_rejected(stage, exc.code, err_body)
+        raise RuntimeError(f"Ark HTTP {exc.code} Bad Request: {err_body}") from exc
 
     task_id = task_data["id"]
     state.data.setdefault("submissions", {})[stage] = {

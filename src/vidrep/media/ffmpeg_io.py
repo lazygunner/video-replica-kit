@@ -36,7 +36,7 @@ class ColorProfile:
             "raw_tags": self.raw_tags or {},
         }
 
-    def ffmpeg_encode_args(self) -> list[str]:
+    def ffmpeg_encode_args(self, input_is_rgb: bool = True) -> list[str]:
         """Return matched zscale matrix + VUI flags so round-trip color error stays minimal."""
         rng = "full" if self.color_range in ("pc", "full") else "limited"
         cr_flag = "pc" if rng == "full" else "tv"
@@ -44,8 +44,13 @@ class ColorProfile:
 
         if self.color_space in ("bt2020nc", "bt2020ncl") or self.color_primaries == "bt2020":
             trc = self.color_transfer if self.color_transfer in ("arib-std-b67", "smpte2084") else "arib-std-b67"
+            vf = (
+                f"zscale=matrix=2020_ncl:range={rng}"
+                if input_is_rgb
+                else f"zscale=matrixin=2020_ncl:matrix=2020_ncl:rangein={rng}:range={rng}"
+            )
             return [
-                "-vf", f"zscale=matrix=2020_ncl:range={rng}",
+                "-vf", vf,
                 "-pix_fmt", pix,
                 "-color_range", cr_flag,
                 "-colorspace", "bt2020nc",
@@ -54,8 +59,13 @@ class ColorProfile:
                 "-x264-params", f"colorprim=bt2020:transfer={trc}:colormatrix=bt2020nc",
             ]
 
+        vf = (
+            f"zscale=matrix=709:range={rng}"
+            if input_is_rgb
+            else f"zscale=matrixin=709:matrix=709:rangein={rng}:range={rng}"
+        )
         return [
-            "-vf", f"zscale=matrix=709:range={rng}",
+            "-vf", vf,
             "-pix_fmt", pix,
             "-color_range", cr_flag,
             "-colorspace", "bt709",

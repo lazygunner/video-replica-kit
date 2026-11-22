@@ -80,19 +80,26 @@ class DepthAnythingV2Onnx:
         if int(core_bool.sum()) < 50 or int(cand_bool.sum()) < 50:
             return np.zeros((h, w), dtype=np.float32), depth, 0.0
 
-        # Reference depth of the original subject itself (p95 so the original subject's own closest
-        # body/head/shoulders can NEVER be mistaken for an external foreground occluder!)
+        # Reference depth of the replaced subject(s): in multi-subject scenes (e.g., giant distant monster
+        # + tiny foreground character), evaluate p95 depth per connected component and take the closest
+        # replaced subject so a closer secondary subject is NEVER mistaken for an external occluder!
         ys, xs = np.where(core_bool)
         y_cut = int(np.percentile(ys, 82))
         upper_core = core_bool.copy()
         upper_core[y_cut:, :] = False
         ref_region = upper_core if int(upper_core.sum()) >= 30 else core_bool
-        d_subject = float(np.percentile(depth[ref_region], 95))
+        d_subject = float(np.percentile(depth[ref_region], 98))
+        n_c, c_lbls, c_stats, _ = cv2.connectedComponentsWithStats(core_bool.astype(np.uint8))
+        for cl in range(1, n_c):
+            if int(c_stats[cl, cv2.CC_STAT_AREA]) >= 120:
+                d_comp = float(np.percentile(depth[c_lbls == cl], 98))
+                if d_comp > d_subject:
+                    d_subject = d_comp
 
         # Genuine foreground occluder (e.g., passing tree trunk, pole, pedestrian in front of subject)
         # must be BOTH significantly closer than d_subject (by depth_margin) AND extend continuously
         # beyond the subject core (not an isolated pixel inside the replaced subject itself).
-        y_ground = int(np.percentile(ys, 90))
+        y_ground = int(np.percentile(ys, 88))
         closer_all = depth > (d_subject + depth_margin)
         closer_all[y_ground:, :] = False
 
@@ -132,9 +139,11 @@ class Sam2OnnxMatte:
         self,
         frame_bgr: np.ndarray,
         boxes_xyxy: list[tuple[float, float, float, float]],
+        anchor_points: list[tuple[float, float]] | None = None,
     ) -> tuple[np.ndarray, float]:
         """
         Encode `frame_bgr` once and decode crisp semantic masks for all detected subject boxes.
+        Uses component peak-diff `anchor_points` when provided (avoiding empty box-center holes).
         Returns (union_mask_float32_in_0_1, mean_best_iou).
         """
         h, w = frame_bgr.shape[:2]
@@ -149,10 +158,14 @@ class Sam2OnnxMatte:
 
         union = np.zeros((h, w), dtype=np.float32)
         ious: list[float] = []
-        for x0, y0, x1, y1 in boxes_xyxy:
+        for idx, (x0, y0, x1, y1) in enumerate(boxes_xyxy):
             bx0, by0 = x0 / w * 1024.0, y0 / h * 1024.0
             bx1, by1 = x1 / w * 1024.0, y1 / h * 1024.0
-            cx, cy = (bx0 + bx1) * 0.5, (by0 + by1) * 0.5
+            if anchor_points and idx < len(anchor_points):
+                cx = anchor_points[idx][0] / w * 1024.0
+                cy = anchor_points[idx][1] / h * 1024.0
+            else:
+                cx, cy = (bx0 + bx1) * 0.5, (by0 + by1) * 0.5
             pts = np.array([[[[cx, cy]]]], dtype=np.float32)
             lbls = np.array([[[1]]], dtype=np.int64)
             boxes = np.array([[[bx0, by0, bx1, by1]]], dtype=np.float32)

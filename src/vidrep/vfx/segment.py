@@ -26,27 +26,38 @@ def _normalize_frame_to_ref(fg: np.ndarray, fo: np.ndarray, bg_mask: np.ndarray)
     return out
 
 
-def _extract_subject_boxes(binary_small: np.ndarray, full_w: int, full_h: int) -> list[tuple[float, float, float, float]]:
+def _extract_subject_prompts(
+    binary_small: np.ndarray,
+    score_small: np.ndarray,
+    full_w: int,
+    full_h: int,
+    max_boxes: int = 6,
+) -> tuple[list[tuple[float, float, float, float]], list[tuple[float, float]]]:
+    """Extract multi-scale subject boxes AND peak-diff interior anchor points (handles giant + tiny subjects)."""
     sh, sw = binary_small.shape[:2]
-    num_lbl, _, stats, _ = cv2.connectedComponentsWithStats(binary_small)
+    num_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(binary_small)
     if num_lbl <= 1:
-        return []
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    max_area = int(areas.max())
-    min_keep = max(int(sw * sh * 0.004), int(max_area * 0.14))
+        return [], []
+    min_keep = max(45, int(sw * sh * 0.0005))
     sx, sy = full_w / sw, full_h / sh
-    boxes: list[tuple[float, float, float, float]] = []
+    cands: list[tuple[int, tuple[float, float, float, float], tuple[float, float]]] = []
     for lbl in range(1, num_lbl):
-        if stats[lbl, cv2.CC_STAT_AREA] < min_keep:
+        area = int(stats[lbl, cv2.CC_STAT_AREA])
+        if area < min_keep:
             continue
         x, y, bw, bh = stats[lbl, cv2.CC_STAT_LEFT], stats[lbl, cv2.CC_STAT_TOP], stats[lbl, cv2.CC_STAT_WIDTH], stats[lbl, cv2.CC_STAT_HEIGHT]
-        pad_x, pad_y = bw * 0.08, bh * 0.08
+        pad_x, pad_y = max(3.0, bw * 0.08), max(3.0, bh * 0.08)
         x0 = max(0.0, (x - pad_x) * sx)
         y0 = max(0.0, (y - pad_y) * sy)
         x1 = min(float(full_w - 1), (x + bw + pad_x) * sx)
         y1 = min(float(full_h - 1), (y + bh + pad_y) * sy)
-        boxes.append((x0, y0, x1, y1))
-    return boxes
+        # Anchor positive point on the strongest semantic diff pixel inside this component (never empty hollow/bg)
+        comp_scores = np.where(labels == lbl, score_small, -1.0)
+        py_s, px_s = np.unravel_index(int(np.argmax(comp_scores)), comp_scores.shape)
+        cands.append((area, (x0, y0, x1, y1), ((px_s + 0.5) * sx, (py_s + 0.5) * sy)))
+    cands.sort(key=lambda t: t[0], reverse=True)
+    cands = cands[:max_boxes]
+    return [c[1] for c in cands], [c[2] for c in cands]
 
 
 def compute_replacement_masks(
@@ -74,12 +85,13 @@ def compute_replacement_masks(
         bg_mask = np.ones((h, w), dtype=bool)
 
     work_w, work_h = 480, max(120, int(round(480 * h / w)))
-    dil_px = max(9, int(round(work_w * dilate_frac)) * 2 + 1)
+    dil_px = max(7, int(round(work_w * dilate_frac * 0.72)) * 2 + 1)
     close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil_px, dil_px))
-    dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(dil_px * 1.45) | 1, int(dil_px * 1.45) | 1))
+    dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(dil_px * 1.25) | 1, int(dil_px * 1.25) | 1))
 
     raw_masks_small: list[np.ndarray] = []
     clean_bins_small: list[np.ndarray] = []
+    scores_small: list[np.ndarray] = []
     centroids = np.zeros((n, 2), dtype=np.float64)
     extents = np.zeros((n, 2), dtype=np.float64)
     coverages: list[float] = []
@@ -91,49 +103,67 @@ def compute_replacement_masks(
         fo_s = cv2.resize(fo, (work_w, work_h), interpolation=cv2.INTER_AREA).astype(np.float32)
         fg_s = cv2.resize(fg_norm, (work_w, work_h), interpolation=cv2.INTER_AREA)
 
-        # Low-frequency patch difference: cancels out 1-3px diffusion edge jitter on high-frequency
-        # foliage/clouds/spirals while keeping real semantic subject & cast-shadow replacements blazing bright!
-        fo_lf = cv2.GaussianBlur(fo_s, (21, 21), 6.0)
-        fg_lf = cv2.GaussianBlur(fg_s, (21, 21), 6.0)
-        rgb_lf_diff = np.mean(np.abs(fg_lf - fo_lf), axis=2)
-
-        lab_o = cv2.cvtColor(np.clip(fo_lf, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
-        lab_g = cv2.cvtColor(np.clip(fg_lf, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
-        # Emphasize chroma (a, b) + luminance low-frequency semantic shift
-        lab_lf_diff = np.sqrt(
-            0.35 * (lab_g[:, :, 0] - lab_o[:, :, 0]) ** 2
-            + 1.35 * (lab_g[:, :, 1] - lab_o[:, :, 1]) ** 2
-            + 1.35 * (lab_g[:, :, 2] - lab_o[:, :, 2]) ** 2
+        # Dual-scale semantic difference:
+        #   - Coarse (17x17) cancels high-frequency foliage/spiral/reed jitter & catches broad shaded faces/shadows
+        #   - Medium-fine (7x7) preserves small/thin secondary subjects (distant dancers, water-sleeves, tentacles)
+        fo_c = cv2.GaussianBlur(fo_s, (17, 17), 5.0)
+        fg_c = cv2.GaussianBlur(fg_s, (17, 17), 5.0)
+        rgb_c = np.mean(np.abs(fg_c - fo_c), axis=2)
+        lab_oc = cv2.cvtColor(np.clip(fo_c, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+        lab_gc = cv2.cvtColor(np.clip(fg_c, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+        lab_c = np.sqrt(
+            0.45 * (lab_gc[:, :, 0] - lab_oc[:, :, 0]) ** 2
+            + 1.35 * (lab_gc[:, :, 1] - lab_oc[:, :, 1]) ** 2
+            + 1.35 * (lab_gc[:, :, 2] - lab_oc[:, :, 2]) ** 2
         )
-        score = cv2.GaussianBlur(0.50 * rgb_lf_diff + 0.50 * lab_lf_diff, (11, 11), 3.0)
+        score_c = 0.50 * rgb_c + 0.50 * lab_c
 
-        # Adaptive threshold anchored to true peak semantic change so noisy background edges never trigger
-        p90 = float(np.percentile(score, 90))
-        s_max = float(np.percentile(score, 99.7))
-        thr = max(diff_threshold * 0.85, p90 + 8.0, s_max * 0.42)
-        bw = (score > thr).astype(np.uint8)
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
-        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, close_k)
+        fo_f = cv2.GaussianBlur(fo_s, (7, 7), 2.0)
+        fg_f = cv2.GaussianBlur(fg_s, (7, 7), 2.0)
+        rgb_f = np.mean(np.abs(fg_f - fo_f), axis=2)
+        lab_of = cv2.cvtColor(np.clip(fo_f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+        lab_gf = cv2.cvtColor(np.clip(fg_f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+        lab_f = np.sqrt(
+            0.45 * (lab_gf[:, :, 0] - lab_of[:, :, 0]) ** 2
+            + 1.35 * (lab_gf[:, :, 1] - lab_of[:, :, 1]) ** 2
+            + 1.35 * (lab_gf[:, :, 2] - lab_of[:, :, 2]) ** 2
+        )
+        score_f = 0.50 * rgb_f + 0.50 * lab_f
 
-        num_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(bw)
-        clean = np.zeros_like(bw)
+        score = cv2.GaussianBlur(np.maximum(score_c, 0.85 * score_f), (5, 5), 1.4)
+        scores_small.append(score)
+
+        # Robust lower-half background noise floor (remains accurate even when giant subjects cover >30% of frame)
+        # scaled softly by scene dynamic range so both sunlit outdoor and low-key dark scenes segment cleanly.
+        p60 = float(np.percentile(score, 60))
+        lower = score[score <= p60]
+        bg_med = float(np.median(lower)) if lower.size else float(np.median(score))
+        sigma_bg = float(1.4826 * np.median(np.abs(lower - bg_med))) if lower.size else 1.5
+        s_peak = float(np.percentile(score, 99.6))
+        contrast_scale = float(np.clip(np.std(fo_s) / 45.0, 0.42, 1.30))
+
+        thr_high = max(diff_threshold * 0.65 * contrast_scale, bg_med + 5.8 * sigma_bg, s_peak * 0.28)
+        thr_low = max(diff_threshold * 0.30 * contrast_scale, bg_med + 3.4 * sigma_bg, s_peak * 0.14)
+
+        # Hysteresis segmentation: keep every multi-scale component (giant monster + tiny human + tentacles + reflections)
+        # whose own peak exceeds thr_high, without penalizing small subjects next to giant ones.
+        bw_low = (score > thr_low).astype(np.uint8)
+        bw_low = cv2.morphologyEx(bw_low, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+        bw_low = cv2.morphologyEx(bw_low, cv2.MORPH_CLOSE, close_k)
+
+        num_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(bw_low)
+        clean = np.zeros_like(bw_low)
+        min_comp_area = max(45, int(work_w * work_h * 0.0005))
         if num_lbl > 1:
-            # Rank components by integrated semantic energy (area * mean score) rather than area alone
-            energies = []
             for lbl in range(1, num_lbl):
                 area = int(stats[lbl, cv2.CC_STAT_AREA])
-                if area < int(work_w * work_h * 0.0025):
+                if area < min_comp_area:
                     continue
                 comp_mask = labels == lbl
-                peak_s = float(np.percentile(score[comp_mask], 90))
-                energies.append((area * peak_s, lbl, peak_s))
-            if energies:
-                energies.sort(reverse=True)
-                best_energy, _, best_peak = energies[0]
-                for en, lbl, pk in energies:
-                    # Keep multi-subject components (e.g. character + monster) only if genuinely strong
-                    if en >= best_energy * 0.18 and pk >= best_peak * 0.62:
-                        clean[labels == lbl] = 255
+                peak95 = float(np.percentile(score[comp_mask], 95))
+                mean_s = float(np.mean(score[comp_mask]))
+                if peak95 >= thr_high and mean_s >= thr_low * 1.15:
+                    clean[comp_mask] = 255
 
         clean_bins_small.append(clean)
         dilated = cv2.dilate(clean, dil_k)
@@ -194,8 +224,8 @@ def compute_replacement_masks(
             sam_kfs: dict[int, np.ndarray] = {}
             ious: list[float] = []
             for gi in kf_indices:
-                boxes = _extract_subject_boxes(clean_bins_small[gi], w, h)
-                m_sam, iou = sam.segment_boxes(gen_aligned[gi], boxes)
+                boxes, pts = _extract_subject_prompts(clean_bins_small[gi], scores_small[gi], w, h)
+                m_sam, iou = sam.segment_boxes(gen_aligned[gi], boxes, anchor_points=pts)
                 sam_kfs[gi] = m_sam
                 if iou > 0:
                     ious.append(iou)

@@ -197,3 +197,47 @@ def test_onnx_sam2_and_depth_local_pipeline(tmp_path: Path):
     assert res["segmentation"]["onnx"]["sam2_mean_iou"] > 0.3
     assert Path(res["qa_files"]["onnx_diagnostics"]).is_file()
     assert res["bg_mae_composited_vs_orig"] < 1.5
+
+
+def test_slice_preview_auto_pads_short_clip_to_ark_min_4s(tmp_path: Path):
+    """Ensure single shots slightly shorter than 4.0s are tail-padded >=4.05s for Ark edit API."""
+    frames = _make_synthetic_frames(n=48, w=320, h=180, replaced=False)  # 2.0s @ 24fps
+    src = tmp_path / "short_2s.mp4"
+    out = tmp_path / "preview_padded.mp4"
+    encode_video_with_audio(frames, 24.0, src, ColorProfile(), crf=14, preset="ultrafast")
+    res = slice_preview_clip(src, out, start_sec=0.0, duration_sec=4.2)
+    assert res["tail_pad_sec"] >= 2.0
+    assert res["info"]["duration"] >= 4.05
+
+
+def test_multiscale_dual_subject_mask_preserves_tiny_secondary_subject():
+    """Ensure a giant replaced subject never masks out a tiny secondary replaced subject (e.g. monster + dancer)."""
+    from vidrep.vfx.segment import compute_replacement_masks
+
+    h, w = 270, 480
+    yy, xx = np.mgrid[0:h, 0:w]
+    bg = np.zeros((h, w, 3), dtype=np.uint8)
+    bg[:, :, 0] = np.clip(45 + 15 * np.sin(xx * 0.04), 0, 255)
+    bg[:, :, 1] = np.clip(50 + 15 * np.cos(yy * 0.05), 0, 255)
+    bg[:, :, 2] = np.clip(55 + 12 * np.sin((xx + yy) * 0.03), 0, 255)
+
+    orig_list, gen_list = [], []
+    for _ in range(5):
+        fo = bg.copy()
+        fg = bg.copy()
+        # Giant primary subject (top-right, ~140x140)
+        cv2.circle(fo, (310, 100), 68, (180, 175, 190), -1)
+        cv2.circle(fg, (310, 100), 68, (75, 90, 85), -1)
+        # Tiny secondary subject (lower-left, ~14x42)
+        cv2.rectangle(fo, (165, 170), (179, 212), (210, 195, 200), -1)
+        cv2.rectangle(fg, (165, 170), (179, 212), (120, 165, 150), -1)
+        orig_list.append(fo)
+        gen_list.append(fg)
+
+    bg_w = np.ones((90, 160), dtype=np.float32)
+    masks, _ = compute_replacement_masks(orig_list, gen_list, bg_w, mode="auto_contour")
+    # Both the giant subject AND the tiny secondary subject must be strongly covered!
+    assert float(masks[2][100, 310]) > 0.85
+    assert float(masks[2][190, 172]) > 0.70
+    # Untouched left background stays 0
+    assert float(masks[2][60, 40]) < 0.05

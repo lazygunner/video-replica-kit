@@ -162,10 +162,12 @@ def cmd_upload(args: argparse.Namespace) -> dict[str, Any]:
     for idx, item in enumerate(ref_list, start=1):
         p = Path(item)
         if not p.is_file():
-            # Allow referencing by alias saved in state.json
+            # Allow referencing by alias saved in state.json or file in <job_dir>/refs/<alias>.png
             ref_entry = (st.data.get("references") or {}).get(item)
             if ref_entry and ref_entry.get("output_path"):
                 p = Path(ref_entry["output_path"])
+            elif (st.job_dir / "refs" / f"{item}.png").is_file():
+                p = st.job_dir / "refs" / f"{item}.png"
         files[f"ref_{idx}"] = p
 
     uploaded = upload_files_to_tos(files, cfg.tos, run_tag=f"vidrep-{args.stage}")
@@ -276,10 +278,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keyframes", default="0.22,0.68", help="Comma-separated timeline fractions to extract sharpest keyframes.")
     sp.set_defaults(func=cmd_probe)
 
-    sp = sub.add_parser("slice-preview", help="Slice a short 2-3s clip for low-cost 480p Flash validation.")
+    sp = sub.add_parser("slice-preview", help="Slice a short ~4.2s clip (Ark edit min 4s) for low-cost 480p Flash validation.")
     sp.add_argument("job_dir")
-    sp.add_argument("--start", type=float, default=2.0)
-    sp.add_argument("--duration", type=float, default=2.5)
+    sp.add_argument("--start", type=float, default=0.0)
+    sp.add_argument("--duration", type=float, default=4.2)
     sp.set_defaults(func=cmd_slice_preview)
 
     sp = sub.add_parser("ref-gen", help="Generate or edit a reference image via pluggable provider.")

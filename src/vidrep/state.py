@@ -52,18 +52,38 @@ class JobState:
     def lock_file_for_stage(self, stage: str) -> Path:
         return self.job_dir / f".submission-lock-{stage}"
 
+    def _has_active_lock_file(self, stage: str) -> bool:
+        lock = self.lock_file_for_stage(stage)
+        if not lock.exists():
+            return False
+        try:
+            meta = json.loads(lock.read_text(encoding="utf-8"))
+            if meta.get("status") == "rejected_4xx":
+                return False
+        except Exception:
+            pass
+        return True
+
     def has_submission_lock(self, stage: str) -> bool:
-        return self.lock_file_for_stage(stage).exists() or stage in (self.data.get("submissions") or {})
+        return self._has_active_lock_file(stage) or stage in (self.data.get("submissions") or {})
+
+    def mark_submission_rejected(self, stage: str, code: int, reason: str) -> None:
+        lock = self.lock_file_for_stage(stage)
+        if stage not in (self.data.get("submissions") or {}):
+            lock.write_text(
+                json.dumps({"status": "rejected_4xx", "http_code": code, "reason": reason[:500], "updated_at": _now_iso()}, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
     def acquire_submission_lock(self, stage: str, meta: dict[str, Any], force: bool = False) -> None:
         lock = self.lock_file_for_stage(stage)
-        if not force and (lock.exists() or stage in (self.data.get("submissions") or {})):
+        if not force and self.has_submission_lock(stage):
             raise RuntimeError(
                 f"Duplicate submission blocked for stage '{stage}'. Lock already exists at {lock}. "
                 "Refusing duplicate billable POST (use --force-resubmit only if explicitly approved by the user)."
             )
         self.job_dir.mkdir(parents=True, exist_ok=True)
-        lock.write_text(json.dumps({"locked_at": _now_iso(), **meta}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        lock.write_text(json.dumps({"status": "locked", "locked_at": _now_iso(), **meta}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def require_preview_passed(self, skip_preview_gate: bool = False) -> None:
         if skip_preview_gate:
@@ -71,6 +91,6 @@ class JobState:
         preview = (self.data.get("submissions") or {}).get("preview") or {}
         if preview.get("status") != "succeeded":
             raise RuntimeError(
-                "Preview gate not passed: run a short 2-3s 480p preview first (`vidrep edit-submit --stage preview --resolution 480p`) "
+                "Preview gate not passed: run a short ~4.2s 480p preview first (`vidrep edit-submit --stage preview --resolution 480p`) "
                 "and verify it before full 720p submission, or pass --skip-preview-gate explicitly."
             )

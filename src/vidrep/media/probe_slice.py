@@ -137,32 +137,54 @@ def run_probe_bundle(
 def slice_preview_clip(
     video_path: Path,
     out_path: Path,
-    start_sec: float = 2.0,
-    duration_sec: float = 2.5,
+    start_sec: float = 0.0,
+    duration_sec: float = 4.2,
     ffmpeg_bin: str = "",
     ffprobe_bin: str = "",
 ) -> dict[str, Any]:
-    """Slice a keyframe-accurate short clip (default 2.5s) for low-cost 480p Flash validation."""
+    """
+    Slice a keyframe-accurate short clip (default 4.2s) for low-cost 480p Flash validation.
+    Ark Seedance 2.5 `edit` mode requires input video duration in [4.0, 30.0] seconds;
+    if the source clip is slightly shorter than 4.1s, the final frame is cleanly held via tpad
+    so zero adjacent-shot frames bleed in while satisfying the >=4.0s API requirement.
+    """
     ff = require_ffmpeg(ffmpeg_bin)
     info = probe_video_info(video_path, ffmpeg_bin=ff, ffprobe_bin=ffprobe_bin)
     total_dur = info["duration"]
-    dur = min(duration_sec, max(2.0, total_dur))
+    target_dur = max(4.1, duration_sec)
+    dur = min(target_dur, total_dur)
     start = max(0.0, min(start_sec, max(0.0, total_dur - dur)))
+    pad_sec = max(0.0, round(4.15 - dur, 3))
+    out_dur = round(dur + pad_sec, 3)
     cp = infer_color_profile(info)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    enc_args = cp.ffmpeg_encode_args(input_is_rgb=False)
+    if pad_sec > 0:
+        # Inject tpad before zscale inside -vf so short (<4.0s) single shots cleanly satisfy Ark's >=4.0s rule
+        vf_idx = enc_args.index("-vf") + 1
+        enc_args[vf_idx] = f"tpad=stop_mode=clone:stop_duration={pad_sec:.3f},{enc_args[vf_idx]}"
+
     cmd = [
         ff, "-y",
         "-ss", f"{start:.3f}",
         "-i", str(video_path),
-        "-t", f"{dur:.3f}",
+        "-t", f"{out_dur:.3f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "16",
     ]
-    cmd += cp.ffmpeg_encode_args()
+    cmd += enc_args
     if info.get("has_audio"):
+        if pad_sec > 0:
+            cmd += ["-af", f"apad=pad_dur={pad_sec:.3f}"]
         cmd += ["-c:a", "aac", "-b:a", "128k"]
     cmd += ["-movflags", "+faststart", str(out_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     clip_info = probe_video_info(out_path, ffmpeg_bin=ff, ffprobe_bin=ffprobe_bin)
-    return {"path": str(out_path), "start_sec": round(start, 3), "requested_duration_sec": round(dur, 3), "info": clip_info}
+    return {
+        "path": str(out_path),
+        "start_sec": round(start, 3),
+        "requested_duration_sec": out_dur,
+        "tail_pad_sec": pad_sec,
+        "info": clip_info,
+    }
