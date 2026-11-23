@@ -160,7 +160,11 @@ def cmd_upload(args: argparse.Namespace) -> dict[str, Any]:
             files["video"] = Path(st.data["source_video"])
 
     ref_list = [x.strip() for x in (args.refs or "").split(",") if x.strip()]
+    passthrough_refs: dict[str, dict[str, Any]] = {}
     for idx, item in enumerate(ref_list, start=1):
+        if item.startswith(("asset://", "http://", "https://")):
+            passthrough_refs[f"ref_{idx}"] = {"url": item, "key": "", "local_path": None}
+            continue
         p = Path(item)
         if not p.is_file():
             # Allow referencing by alias saved in state.json or file in <job_dir>/refs/<alias>.png
@@ -171,7 +175,8 @@ def cmd_upload(args: argparse.Namespace) -> dict[str, Any]:
                 p = st.job_dir / "refs" / f"{item}.png"
         files[f"ref_{idx}"] = p
 
-    uploaded = upload_files_to_tos(files, cfg.tos, run_tag=f"vidrep-{args.stage}")
+    uploaded = upload_files_to_tos(files, cfg.tos, run_tag=f"vidrep-{args.stage}") if files else {}
+    uploaded.update(passthrough_refs)
     st.data.setdefault("uploads", {})[args.stage] = uploaded
     st.record_event("upload", {"stage": args.stage, "count": len(uploaded)})
     st.save()

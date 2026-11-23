@@ -241,3 +241,27 @@ def test_multiscale_dual_subject_mask_preserves_tiny_secondary_subject():
     assert float(masks[2][190, 172]) > 0.70
     # Untouched left background stays 0
     assert float(masks[2][60, 40]) < 0.05
+
+
+def test_upload_passes_through_ark_asset_uris(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Ensure asset:// URIs (e.g. Tapdance/NiegeIP authorized virtual portraits) bypass TOS upload cleanly."""
+    from vidrep import cli
+
+    job_dir = tmp_path / "asset_job"
+    job_dir.mkdir()
+    st = JobState(job_dir)
+    st.save()
+
+    called_files: dict[str, Path] = {}
+
+    def fake_upload(files: dict[str, Path], tos_cfg, run_tag: str = ""):
+        called_files.update(files)
+        return {k: {"url": f"https://tos.example/{k}", "key": k, "local_path": str(v)} for k, v in files.items()}
+
+    monkeypatch.setattr(cli, "upload_files_to_tos", fake_upload)
+    rc = cli.main(["upload", str(job_dir), "--stage", "preview", "--refs-only", "--refs", "asset://ark-portrait-123,https://cdn.example/prod.png"])
+    assert rc == 0
+    assert called_files == {}
+    reloaded = JobState(job_dir).data["uploads"]["preview"]
+    assert reloaded["ref_1"]["url"] == "asset://ark-portrait-123"
+    assert reloaded["ref_2"]["url"] == "https://cdn.example/prod.png"
